@@ -1,0 +1,54 @@
+name: Build SMSGate Debug APK - No Firebase Config
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Disable Google Services plugin for test build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("app/build.gradle")
+          text = p.read_text(encoding="utf-8")
+
+          candidates = [
+              "    id 'com.google.gms.google-services'\n",
+              "\tid 'com.google.gms.google-services'\n",
+              "id 'com.google.gms.google-services'\n"
+          ]
+
+          removed = False
+          for old in candidates:
+              if old in text:
+                  text = text.replace(old, "")
+                  removed = True
+
+          p.write_text(text, encoding="utf-8")
+          print("Google Services plugin removed:", removed)
+          PY
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smsgate-debug-no-firebase-apk
+          path: app/build/outputs/apk/debug/*.apk
