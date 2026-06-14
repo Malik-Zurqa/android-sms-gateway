@@ -1,0 +1,107 @@
+name: Build SMSGate Debug APK - Jaib Filter
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Disable Google Services plugin for test build
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("app/build.gradle")
+          text = p.read_text(encoding="utf-8")
+
+          candidates = [
+              "    id 'com.google.gms.google-services'\n",
+              "\tid 'com.google.gms.google-services'\n",
+              "id 'com.google.gms.google-services'\n"
+          ]
+
+          removed = False
+          for old in candidates:
+              if old in text:
+                  text = text.replace(old, "")
+                  removed = True
+
+          p.write_text(text, encoding="utf-8")
+          print("Google Services plugin removed:", removed)
+          PY
+
+      - name: Apply Jaib incoming SMS filter
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("app/src/main/java/me/capcom/smsgateway/modules/receiver/MessagesReceiver.kt")
+          text = p.read_text(encoding="utf-8")
+
+          marker = "        val firstMessage = messages.first()\n"
+          insert = """
+        val firstMessage = messages.first()
+
+        // Custom local filter:
+        // Allow only incoming SMS from Jaib.
+        // Block messages that contain the Arabic word "رمز".
+        if (!isDataMessage) {
+            val incomingSender = firstMessage.displayOriginatingAddress.orEmpty().trim()
+            val incomingBody = messages.joinToString(separator = "") { it.displayMessageBody.orEmpty() }
+
+            val allowedSenders = listOf(
+                "Jaib"
+            )
+
+            val blockedWords = listOf(
+                "رمز"
+            )
+
+            val isAllowedSender = allowedSenders.any {
+                incomingSender.equals(it, ignoreCase = true)
+            }
+
+            val hasBlockedWord = blockedWords.any {
+                incomingBody.contains(it, ignoreCase = true)
+            }
+
+            if (!isAllowedSender || hasBlockedWord) {
+                Log.i(TAG, "Filtered incoming SMS before webhook processing: sender=$incomingSender")
+                return
+            }
+        }
+"""
+
+          if marker not in text:
+              raise SystemExit("Patch marker not found in MessagesReceiver.kt")
+
+          if "Custom local filter:" in text:
+              print("Jaib filter already applied.")
+          else:
+              text = text.replace(marker, insert, 1)
+              p.write_text(text, encoding="utf-8")
+              print("Jaib filter applied to MessagesReceiver.kt")
+          PY
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smsgate-debug-jaib-filter-apk
+          path: app/build/outputs/apk/debug/*.apk
