@@ -1,0 +1,95 @@
+name: Build SMSGate Debug APK - Jaib Filter Firebase
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Restore google-services.json
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          value = os.environ.get("GOOGLE_SERVICES_JSON", "").strip()
+          if not value:
+              raise SystemExit("Missing GitHub secret: GOOGLE_SERVICES_JSON")
+
+          Path("app/google-services.json").write_text(value, encoding="utf-8")
+          print("google-services.json restored.")
+          PY
+
+      - name: Apply Jaib incoming SMS filter
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("app/src/main")
+          files = list(root.rglob("MessagesReceiver.kt"))
+
+          if not files:
+              raise SystemExit("MessagesReceiver.kt not found")
+
+          p = files[0]
+          text = p.read_text(encoding="utf-8")
+
+          marker = "        val inboxMessage = when (isDataMessage) {\n"
+
+          if marker not in text:
+              raise SystemExit("Patch marker not found: val inboxMessage = when (isDataMessage)")
+
+          if "Custom local filter: JAIB_ONLY_NO_CODE" in text:
+              print("Jaib filter already applied.")
+          else:
+              insert_lines = [
+                  "        // Custom local filter: JAIB_ONLY_NO_CODE",
+                  "        // Allow only SMS from sender Jaib and block messages containing the Arabic word رمز.",
+                  "        if (!isDataMessage) {",
+                  "            val incomingSender = firstMessage.displayOriginatingAddress.orEmpty().trim()",
+                  "            val incomingBody = messages.joinToString(separator = \"\") { it.displayMessageBody.orEmpty() }",
+                  "",
+                  "            val allowedSenders = listOf(\"Jaib\", \"774252638\")",
+                  "            val blockedWords = listOf(\"\\u0631\\u0645\\u0632\")",
+                  "",
+                  "            val isAllowedSender = allowedSenders.any { incomingSender.equals(it, ignoreCase = true) }",
+                  "            val hasBlockedWord = blockedWords.any { incomingBody.contains(it, ignoreCase = true) }",
+                  "",
+                  "            if (!isAllowedSender || hasBlockedWord) {",
+                  "                Log.i(TAG, \"Filtered incoming SMS before webhook processing: sender=$incomingSender\")",
+                  "                return",
+                  "            }",
+                  "        }",
+                  ""
+              ]
+
+              insert = "\n".join(insert_lines) + "\n"
+              text = text.replace(marker, insert + marker, 1)
+              p.write_text(text, encoding="utf-8")
+              print("Jaib filter applied to:", p)
+          PY
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smsgate-debug-jaib-filter-firebase-apk
+          path: app/build/outputs/apk/debug/*.apk
